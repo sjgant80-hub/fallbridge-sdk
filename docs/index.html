@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>fallbridge-sdk · playground</title>
+<style>
+:root{--void:#1a1a1e;--deep:#212127;--surface:#2a2a30;--line:rgba(232,228,219,0.08);--text:#e8e4db;--muted:#928d80;--sage:#7a9c7e;--sage-dim:rgba(122,156,126,0.14);--amber:#d4a052;--amber-dim:rgba(212,160,82,0.12);--coral:#d67a5a;--mono:'JetBrains Mono','IBM Plex Mono',monospace;--sans:'Inter',-apple-system,system-ui,sans-serif;--serif:'Cormorant Garamond',Georgia,serif}
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{background:var(--void);color:var(--text);font-family:var(--sans);font-size:15px;line-height:1.6;min-height:100vh}
+h1{font-family:var(--serif);font-weight:400;font-size:32px}
+h1 em{color:var(--sage);font-style:italic}
+h3{font-family:var(--mono);font-size:11.5px;color:var(--muted);text-transform:uppercase;letter-spacing:0.16em;margin-bottom:10px}
+main{padding:24px;max-width:960px;margin:0 auto}
+.card{background:var(--deep);border:1px solid var(--line);border-radius:14px;padding:22px 24px;margin-bottom:16px}
+.btn{background:var(--sage);color:var(--void);padding:12px 22px;border-radius:8px;font-family:var(--mono);font-size:11px;letter-spacing:0.14em;text-transform:uppercase;font-weight:700;border:none;cursor:pointer;margin-right:8px}
+.btn:disabled{opacity:0.4;cursor:not-allowed}
+.btn.ghost{background:transparent;color:var(--text);border:1px solid var(--line)}
+.btn.coral{background:var(--coral)}
+.stat{display:grid;grid-template-columns:140px 1fr;gap:10px;padding:6px 0;border-bottom:1px solid var(--line);font-size:14px}
+.stat .k{color:var(--muted);font-family:var(--mono);font-size:10.5px;letter-spacing:0.12em;text-transform:uppercase}
+.stat .v{font-family:var(--mono);font-size:13px;word-break:break-all}
+.row{display:flex;gap:8px;margin-top:12px;flex-wrap:wrap}
+input,select,textarea{background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:10px 12px;color:var(--text);font-family:var(--mono);font-size:13px;flex:1;min-width:0}
+.log{background:#0e0e12;border:1px solid var(--line);border-radius:8px;padding:14px;font-family:var(--mono);font-size:12px;color:var(--sage);max-height:320px;overflow-y:auto;white-space:pre-wrap;line-height:1.6}
+.warn{background:var(--amber-dim);border-left:3px solid var(--amber);padding:10px 14px;border-radius:6px;font-family:var(--mono);font-size:12px;margin-bottom:16px}
+.pill{display:inline-block;padding:3px 10px;border-radius:12px;font-family:var(--mono);font-size:10px;letter-spacing:0.14em;text-transform:uppercase;background:var(--sage-dim);color:var(--sage)}
+code{background:var(--surface);padding:2px 6px;border-radius:4px;font-family:var(--mono);color:var(--amber)}
+a{color:var(--sage)}
+.foot{padding:24px;text-align:center;color:var(--muted);font-family:var(--mono);font-size:10.5px;letter-spacing:0.14em;text-transform:uppercase}
+</style>
+</head>
+<body>
+<main>
+  <h1>fallbridge-sdk <em>playground</em></h1>
+  <p style="color:var(--muted);margin:6px 0 16px 0">Pair a BLE-mesh dongle, send messages, watch peers. Uses the SDK straight from <code>src/index.js</code>.</p>
+  <div class="warn" id="warn" style="display:none">Web Bluetooth not available. Use Chrome or Edge desktop, or Chrome on Android.</div>
+
+  <div class="card">
+    <h3>Connection</h3>
+    <div class="stat"><div class="k">State</div><div class="v" id="state">not paired</div></div>
+    <div class="stat"><div class="k">Device</div><div class="v" id="dev">—</div></div>
+    <div class="stat"><div class="k">Protocol</div><div class="v" id="proto">—</div></div>
+    <div class="stat"><div class="k">Battery</div><div class="v" id="batt">—</div></div>
+    <div class="stat"><div class="k">Peers</div><div class="v" id="peers">0</div></div>
+    <div class="row">
+      <button class="btn" id="pair">Pair device</button>
+      <button class="btn ghost" id="battBtn" disabled>Read battery</button>
+      <button class="btn coral" id="disc" disabled>Disconnect</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>Send</h3>
+    <div class="row">
+      <select id="dest"><option value="">Broadcast (ALL)</option></select>
+      <input id="msg" placeholder="type a message">
+      <button class="btn" id="send" disabled>Send</button>
+    </div>
+    <div class="row">
+      <input id="hex" placeholder="hex bytes: 48 65 6c 6c 6f 0a">
+      <button class="btn ghost" id="hexBtn" disabled>Write hex</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>Log</h3>
+    <div class="log" id="log">// awaiting device…</div>
+  </div>
+
+  <div class="card">
+    <h3>Install</h3>
+    <pre style="font-family:var(--mono);font-size:12.5px;color:var(--text);background:var(--surface);padding:12px;border-radius:8px;overflow-x:auto">npm install @ai-native-solutions/fallbridge-sdk</pre>
+    <p style="color:var(--muted);margin-top:10px;font-size:13.5px">Repo: <a href="https://github.com/sjgant80-hub/fallbridge-sdk">github.com/sjgant80-hub/fallbridge-sdk</a></p>
+  </div>
+</main>
+<footer class="foot">fallbridge-sdk · <a href="https://ai-nativesolutions.com" style="color:var(--muted)">AI-Native Solutions</a> · MIT</footer>
+
+<script type="module">
+import { FallBridge } from '../src/index.js';
+
+const $ = s => document.querySelector(s);
+const bridge = new FallBridge({ debug: true });
+window.__bridge = bridge;
+
+if (!navigator.bluetooth) { $('#warn').style.display = 'block'; $('#pair').disabled = true; }
+
+function log(l){ const el=$('#log'); if (el.textContent.startsWith('// awaiting')) el.textContent=''; el.textContent += l + '\n'; el.scrollTop = el.scrollHeight; }
+
+bridge.onState(s => {
+  $('#state').innerHTML = `<span class="pill">${s.state}</span>`;
+  if (s.name) $('#dev').textContent = s.name;
+  if (s.protocol) $('#proto').textContent = s.protocol;
+  const on = s.state === 'connected';
+  ['send','hexBtn','disc','battBtn'].forEach(id => $('#'+id).disabled = !on);
+  $('#pair').disabled = on;
+  log(`[state] ${s.state}${s.protocol?' · '+s.protocol:''}`);
+});
+
+bridge.onMessage(m => {
+  if (m.dir === 'out') log(`> ${m.dest?'@'+m.dest+' ':''}${m.text}`);
+  else log(`< ${m.from?'['+m.from+'] ':''}${m.text}`);
+});
+
+bridge.onPeer(() => {
+  const peers = bridge.getPeers();
+  $('#peers').textContent = peers.length;
+  const sel = $('#dest'); const cur = sel.value;
+  sel.innerHTML = '<option value="">Broadcast (ALL)</option>' + peers.map(p =>
+    `<option value="${p.id}">${p.name || p.id}</option>`).join('');
+  sel.value = cur;
+});
+
+$('#pair').onclick   = () => bridge.pair().catch(e => log('! ' + e.message));
+$('#disc').onclick   = () => bridge.disconnect();
+$('#battBtn').onclick = async () => { const b = await bridge.getBattery(); $('#batt').textContent = b === null ? 'unavailable' : b + ' %'; };
+$('#send').onclick   = () => { const t = $('#msg').value.trim(); if (!t) return; bridge.send(t, $('#dest').value || null).then(()=>$('#msg').value=''); };
+$('#msg').onkeydown  = e => { if (e.key==='Enter'){ e.preventDefault(); $('#send').click(); } };
+$('#hexBtn').onclick = () => { const h = $('#hex').value.trim(); if (!h) return; bridge.sendHex(h).then(n => { log(`> [${n}B hex]`); $('#hex').value=''; }); };
+</script>
+</body>
+</html>
