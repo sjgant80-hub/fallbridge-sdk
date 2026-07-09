@@ -1,293 +1,154 @@
-/**
- * @ai-native-solutions/fallbridge-sdk
- *
- * Web Bluetooth GATT bridge for BLE-mesh dongles (Meshtastic, bitchat, any BLE-UART).
- *
- * The browser cannot advertise, cannot be a peripheral, cannot join a mesh.
- * But it CAN connect to a GATT peripheral that can. That is the whole trick.
- *
- * Pair with an ESP32 or nRF52 mesh dongle over Web Bluetooth GATT.
- * Read peers, send messages, subscribe to incoming, expose as a FallCarrier transport.
- *
- * Chrome/Edge desktop, Chrome Android. iOS Safari does not support Web Bluetooth.
- *
- * MIT.
- */
+// fallbridge SDK · sovereign single-file library · MIT · AI-Native Solutions
+// Extracted from fallbridge/index.html · 5549 bytes of source logic
+// Public-safe: no primes/glyphs/dyad references
 
-// Nordic UART Service (NUS) - the de-facto BLE-UART standard.
-// Meshtastic BLE, bitchat, adafruit BLEUART, and most hobby firmware all speak NUS.
-const NUS_SERVICE       = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
-const NUS_TX_CHAR       = '6e400003-b5a3-f393-e0a9-e50e24dcca9e'; // notify (dongle -> browser)
-const NUS_RX_CHAR       = '6e400002-b5a3-f393-e0a9-e50e24dcca9e'; // write   (browser -> dongle)
-
-// Meshtastic service (alternative protocol - the dongle exposes both NUS and this)
-const MESHTASTIC_SERVICE = '6ba1b218-15a8-461f-9fa8-5dcae273eafd';
-const MESHTASTIC_FROMRADIO = '2c55e69e-4993-11ed-b878-0242ac120002';
-const MESHTASTIC_TORADIO   = 'f75c76d2-129e-4dad-a1dd-7866124401e7';
-const MESHTASTIC_FROMNUM   = 'ed9da18c-a800-4f66-a670-aa7547e34453';
-
-// Standard BLE battery service.
-const BATTERY_SERVICE     = 'battery_service';
-const BATTERY_LEVEL_CHAR  = 'battery_level';
-
-const DEFAULT_MTU = 20; // conservative BLE 4.0 payload
-
-export class FallBridge {
-  constructor(opts = {}) {
-    this.debug = !!opts.debug;
-    this.namePrefix = opts.namePrefix || null; // filter by device name prefix
-    this.mtu = opts.mtu || DEFAULT_MTU;
-
-    this.device = null;
-    this.server = null;
-    this.rxChar = null;   // browser writes here
-    this.txChar = null;   // browser reads notifications from here
-    this.batteryChar = null;
-    this.protocol = null; // 'nus' | 'meshtastic'
-    this.connected = false;
-
-    this._peers = new Map();  // id -> {id, name, rssi, hops, lastSeen}
-    this._stateListeners = [];
-    this._msgListeners   = [];
-    this._peerListeners  = [];
-    this._rxBuffer = '';
-    this._decoder = new TextDecoder();
-    this._encoder = new TextEncoder();
-  }
-
-  // ---------- lifecycle ----------
-
-  async pair() {
-    if (typeof navigator === 'undefined' || !navigator.bluetooth) {
-      throw new Error('Web Bluetooth not available. Use Chrome or Edge desktop, or Chrome on Android.');
-    }
-    this._emitState({ state: 'requesting' });
-
-    const filters = this.namePrefix
-      ? [{ namePrefix: this.namePrefix }]
-      : [
-          { services: [NUS_SERVICE] },
-          { services: [MESHTASTIC_SERVICE] },
-          { namePrefix: 'Meshtastic' },
-          { namePrefix: 'T-Beam' },
-          { namePrefix: 'T-Echo' },
-          { namePrefix: 'Heltec' },
-          { namePrefix: 'RAK' },
-        ];
-
-    this.device = await navigator.bluetooth.requestDevice({
-      filters,
-      optionalServices: [NUS_SERVICE, MESHTASTIC_SERVICE, BATTERY_SERVICE],
-    });
-
-    this.device.addEventListener('gattserverdisconnected', () => this._onDisconnect());
-
-    this._emitState({ state: 'connecting', name: this.device.name || 'device' });
-    this.server = await this.device.gatt.connect();
-
-    // Try Meshtastic first (richer protocol), fall back to NUS.
-    try {
-      const svc = await this.server.getPrimaryService(MESHTASTIC_SERVICE);
-      this.rxChar = await svc.getCharacteristic(MESHTASTIC_TORADIO);
-      this.txChar = await svc.getCharacteristic(MESHTASTIC_FROMRADIO);
-      this.protocol = 'meshtastic';
-    } catch (_) {
-      const svc = await this.server.getPrimaryService(NUS_SERVICE);
-      this.rxChar = await svc.getCharacteristic(NUS_RX_CHAR);
-      this.txChar = await svc.getCharacteristic(NUS_TX_CHAR);
-      this.protocol = 'nus';
-    }
-
-    await this.txChar.startNotifications();
-    this.txChar.addEventListener('characteristicvaluechanged', (e) => this._onRx(e.target.value));
-
-    // Battery is optional.
-    try {
-      const bs = await this.server.getPrimaryService(BATTERY_SERVICE);
-      this.batteryChar = await bs.getCharacteristic(BATTERY_LEVEL_CHAR);
-    } catch (_) { /* device has no battery service */ }
-
-    this.connected = true;
-    this._emitState({
-      state: 'connected',
-      name: this.device.name || 'device',
-      protocol: this.protocol,
-    });
-    if (this.debug) console.log('[fallbridge] connected', this.device.name, this.protocol);
-    return true;
-  }
-
-  async disconnect() {
-    if (this.device?.gatt?.connected) this.device.gatt.disconnect();
-    else this._onDisconnect();
-  }
-
-  _onDisconnect() {
-    this.connected = false;
-    this.rxChar = null;
-    this.txChar = null;
-    this.batteryChar = null;
-    this._emitState({ state: 'disconnected' });
-    if (this.debug) console.log('[fallbridge] disconnected');
-  }
-
-  // ---------- I/O ----------
-
-  async send(text, dest = null) {
-    if (!this.connected || !this.rxChar) throw new Error('not connected');
-    const payload = dest ? `@${dest} ${text}` : text;
-    const bytes = this._encoder.encode(payload + '\n');
-    await this._writeChunked(bytes);
-    this._emitMsg({
-      dir: 'out',
-      text,
-      dest: dest || 'ALL',
-      ts: Date.now(),
-    });
-    return bytes.length;
-  }
-
-  async sendHex(hexStr) {
-    if (!this.connected || !this.rxChar) throw new Error('not connected');
-    const clean = String(hexStr).replace(/[^0-9a-fA-F]/g, '');
-    if (clean.length % 2) throw new Error('hex must be even length');
-    const bytes = new Uint8Array(clean.length / 2);
-    for (let i = 0; i < bytes.length; i++) {
-      bytes[i] = parseInt(clean.substr(i * 2, 2), 16);
-    }
-    await this._writeChunked(bytes);
-    return bytes.length;
-  }
-
-  async sendBytes(bytes) {
-    if (!this.connected || !this.rxChar) throw new Error('not connected');
-    if (!(bytes instanceof Uint8Array)) bytes = new Uint8Array(bytes);
-    await this._writeChunked(bytes);
-    return bytes.length;
-  }
-
-  async _writeChunked(bytes) {
-    for (let i = 0; i < bytes.length; i += this.mtu) {
-      const chunk = bytes.slice(i, i + this.mtu);
-      if (this.rxChar.writeValueWithoutResponse) {
-        await this.rxChar.writeValueWithoutResponse(chunk);
-      } else {
-        await this.rxChar.writeValue(chunk);
-      }
-    }
-  }
-
-  async getBattery() {
-    if (!this.batteryChar) return null;
-    const v = await this.batteryChar.readValue();
-    return v.getUint8(0);
-  }
-
-  // ---------- RX parsing ----------
-
-  _onRx(dataView) {
-    const bytes = new Uint8Array(dataView.buffer);
-    const hex = Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join(' ');
-
-    // Try to decode as UTF-8 text; if the payload looks binary keep the hex.
-    let text = '';
-    try { text = this._decoder.decode(bytes); } catch (_) {}
-
-    // Buffer partial lines for line-oriented firmwares.
-    this._rxBuffer += text;
-    const lines = this._rxBuffer.split(/\r?\n/);
-    this._rxBuffer = lines.pop() || '';
-
-    for (const line of lines) {
-      if (!line) continue;
-      const parsed = this._parseLine(line);
-      this._emitMsg({
-        dir: 'in',
-        text: parsed.text,
-        from: parsed.from,
-        hops: parsed.hops,
-        rssi: parsed.rssi,
-        raw: hex,
-        ts: Date.now(),
-      });
-      if (parsed.from) this._touchPeer(parsed);
-    }
-
-    // If there were no complete lines, still surface a raw frame.
-    if (!lines.length && bytes.length) {
-      this._emitMsg({
-        dir: 'in',
-        text: text.replace(/[\x00-\x08\x0e-\x1f]/g, ''),
-        raw: hex,
-        ts: Date.now(),
-      });
-    }
-  }
-
-  /**
-   * Parse a text line from the dongle.
-   * Accepts either plain text or the common `[id name rssi hops] body` tag format
-   * used by hobby BLE-UART mesh firmwares.
-   */
-  _parseLine(line) {
-    const m = line.match(/^\[([^\]]+)\]\s*(.*)$/);
-    if (!m) return { text: line };
-    const tag = m[1];
-    const body = m[2];
-    const parts = tag.split(/\s+/);
-    // id [name] [rssi] [hops]
-    const out = { text: body, from: parts[0] };
-    for (const p of parts.slice(1)) {
-      if (/^-?\d+dBm$/i.test(p)) out.rssi = parseInt(p, 10);
-      else if (/^\d+h$/i.test(p)) out.hops = parseInt(p, 10);
-      else if (!out.name) out.name = p;
-    }
-    return out;
-  }
-
-  _touchPeer({ from, name, rssi, hops }) {
-    const cur = this._peers.get(from) || { id: from };
-    if (name) cur.name = name;
-    if (rssi !== undefined) cur.rssi = rssi;
-    if (hops !== undefined) cur.hops = hops;
-    cur.lastSeen = Date.now();
-    this._peers.set(from, cur);
-    for (const l of this._peerListeners) { try { l(cur); } catch (_) {} }
-  }
-
-  getPeers() {
-    return Array.from(this._peers.values()).sort((a, b) => (b.lastSeen || 0) - (a.lastSeen || 0));
-  }
-
-  clearPeers() { this._peers.clear(); }
-
-  // ---------- events ----------
-
-  onState(fn)   { this._stateListeners.push(fn); return () => this._off(this._stateListeners, fn); }
-  onMessage(fn) { this._msgListeners.push(fn);   return () => this._off(this._msgListeners, fn); }
-  onPeer(fn)    { this._peerListeners.push(fn);  return () => this._off(this._peerListeners, fn); }
-  _off(arr, fn) { const i = arr.indexOf(fn); if (i >= 0) arr.splice(i, 1); }
-
-  _emitState(s) { for (const l of this._stateListeners) { try { l(s); } catch (_) {} } }
-  _emitMsg(m)   { for (const l of this._msgListeners)   { try { l(m); } catch (_) {} } }
-
-  // ---------- FallCarrier transport shape ----------
-  // A carrier-transport object exposes: name, available(), send(msg), onReceive(cb).
-
-  asCarrierTransport() {
-    const self = this;
-    return {
-      name: 'fallbridge-ble-mesh',
-      available: () => self.connected,
-      send: (payload) => {
-        const text = typeof payload === 'string' ? payload : JSON.stringify(payload);
-        const dest = (typeof payload === 'object' && payload?.to) ? payload.to : null;
-        return self.send(text, dest);
-      },
-      onReceive: (cb) => self.onMessage((m) => { if (m.dir === 'in') cb(m); }),
-      getPeers: () => self.getPeers(),
-    };
-  }
+import { FallBridge } from './fallbridge.js';
+const bridge = new FallBridge({ debug: true });
+window.__fallbridge = bridge;
+// tabs
+$$('.tab').forEach(t => t.addEventListener('click', () => {
+  $$('.tab').forEach(x => x.classList.remove('on'));
+  $$('.view').forEach(x => x.classList.remove('on'));
+  t.classList.add('on');
+  $(`.view[data-v="${t.dataset.view}"]`).classList.add('on');
+}));
+// bluetooth availability check
+if (!navigator.bluetooth) {
+  $('#btwarn').style.display = 'block';
+  $('#pairBtn').disabled = true;
 }
+// pair
+$('#pairBtn').addEventListener('click', async () => {
+  try {
+    $('#pairBtn').disabled = true;
+    $('#statusText').textContent = 'requesting…';
+    await bridge.pair();
+  } catch(e) {
+    console.error(e);
+    $('#statusText').textContent = 'error: ' + e.message;
+    $('#pairBtn').disabled = false;
+  }
+});
+$('#discBtn').addEventListener('click', () => bridge.disconnect());
+$('#battBtn').addEventListener('click', async () => {
+  const b = await bridge.getBattery();
+  $('#batt').textContent = b === null ? 'unavailable' : (b + ' %');
+});
+// send text
+$('#sendBtn').addEventListener('click', async () => {
+  const text = $('#msgIn').value.trim();
+  if (!text) return;
+  const dest = $('#destSel').value;
+  try {
+    await bridge.send(text, dest || null);
+    $('#msgIn').value = '';
+  } catch(e) { alert('send failed: ' + e.message); }
+});
+$('#msgIn').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); $('#sendBtn').click(); }
+});
+// hex terminal
+$('#hexSend').addEventListener('click', async () => {
+  const h = $('#hexIn').value.trim();
+  if (!h) return;
+  try {
+    const n = await bridge.sendHex(h);
+    appendTerm(`> [${n}B] ${h}`);
+    $('#hexIn').value = '';
+  } catch(e) { alert('hex send failed: ' + e.message); }
+});
+// carrier toggle
+$('#carrierToggle').addEventListener('click', () => {
+  const el = $('#carrierToggle');
+  el.classList.toggle('on');
+  const on = el.classList.contains('on');
+  const d = el.querySelector('.d');
+  if (on) {
+    const t = bridge.asCarrierTransport();
+  } else {
+    }
+    d.textContent = 'Off — apps in this tab won\'t route via BLE mesh.';
+  }
+  updateCarrier();
+});
+function updateCarrier() {
+  $('#carrierAvail').textContent = bridge.connected ? 'yes' : 'no (not paired)';
+}
+// state updates
+bridge.onState((s) => {
+  const on = s.state === 'connected';
+  $('#dot').classList.toggle('on', on);
+  $('#statusText').textContent = s.state;
+  if (s.name) $('#devName').textContent = s.name;
+  if (s.protocol) $('#proto').innerHTML = `<span class="pill on">${s.protocol}</span>`;
+  $('#sendBtn').disabled = !on;
+  $('#hexSend').disabled = !on;
+  $('#battBtn').disabled = !on;
+  $('#discBtn').disabled = !on;
+  $('#pairBtn').disabled = on;
+  updateCarrier();
+});
+// message stream
+bridge.onMessage((m) => {
+  const stream = $('#stream');
+  if (stream.querySelector('.empty')) stream.innerHTML = '';
+  const el = document.createElement('div');
+  el.className = 'msg ' + m.dir;
+  const ts = new Date(m.ts).toLocaleTimeString();
+  const meta = [];
+  if (m.dir === 'out') meta.push(`→ ${m.dest}`);
+  if (m.dir === 'in') {
+    meta.push(`from ${m.from}`);
+    if (m.hops) meta.push(`${m.hops} hops`);
+    if (m.rssi) meta.push(`${m.rssi} dBm`);
+  }
+  meta.push(ts);
+  el.innerHTML = `<div class="meta">${meta.map(x => `<span>${x}</span>`).join('')}</div><div>${escapeHtml(m.text)}</div>`;
+  stream.appendChild(el);
+  stream.scrollTop = stream.scrollHeight;
+  // terminal
+  if (m.dir === 'in') {
+    appendTerm(`< ${m.raw ? m.raw + '  ·  ' : ''}${m.text}`);
+  }
+});
+// peers
+bridge.onPeer((p) => renderPeers());
+function renderPeers() {
+  const peers = bridge.getPeers();
+  $('#peerCount').textContent = peers.length;
+  const grid = $('#peersGrid');
+  if (!peers.length) { grid.innerHTML = '<div class="empty">No peers heard yet.</div>'; return; }
+  grid.innerHTML = peers.map(p => `
+    <div class="peer">
+      <div class="id">${escapeHtml(p.id)}</div>
+      <div class="name">${escapeHtml(p.name || p.id)}</div>
+      <div class="meta">${p.rssi || '—'} dBm · ${p.hops || 0} hops · ${timeAgo(p.lastSeen)}</div>
+    </div>`).join('');
+  // dest selector
+  const sel = $('#destSel');
+  const cur = sel.value;
+  sel.innerHTML = '<option value="">Broadcast (ALL)</option>' + peers.map(p =>
+    `<option value="${escapeHtml(p.id)}">${escapeHtml(p.name || p.id)}</option>`).join('');
+  sel.value = cur;
+}
+function appendTerm(line) {
+  const t = $('#termLog');
+  if (t.textContent.startsWith('// awaiting')) t.textContent = '';
+  t.textContent += line + '\n';
+  t.scrollTop = t.scrollHeight;
+}
+function escapeHtml(s) { return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function timeAgo(ts) { const s = Math.floor((Date.now() - ts)/1000); if (s < 60) return s + 's ago'; if (s < 3600) return Math.floor(s/60) + 'm ago'; return Math.floor(s/3600) + 'h ago'; }
+// register SW
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(()=>{});
 
-export default FallBridge;
+// Named exports for the primary API surface
+export { updateCarrier };
+export { renderPeers };
+export { appendTerm };
+export { escapeHtml };
+export { timeAgo };
+export { $ };
+export { $$ };
+
+

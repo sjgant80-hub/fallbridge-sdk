@@ -1,30 +1,16 @@
 {
   "name": "@ai-native-solutions/fallbridge-sdk",
   "version": "1.0.0",
-  "description": "Web Bluetooth GATT bridge for BLE-mesh dongles (Meshtastic, bitchat, Nordic UART). Browser is the UI, dongle is the radio.",
+  "description": "fallbridge SDK · sovereign single-file library extracted from fallbridge/index.html",
   "type": "module",
   "main": "src/index.js",
-  "module": "src/index.js",
-  "exports": {
-    ".": "./src/index.js"
-  },
+  "types": "src/index.d.ts",
   "files": ["src", "docs", "README.md", "LICENSE"],
   "scripts": {
-    "test": "node --check src/index.js && echo syntax ok"
+    "test": "node --test test/",
+    "smoke": "node examples/smoke.js"
   },
-  "keywords": [
-    "web-bluetooth",
-    "ble",
-    "gatt",
-    "mesh",
-    "meshtastic",
-    "nordic-uart",
-    "esp32",
-    "nrf52",
-    "off-grid",
-    "lora",
-    "fallbridge"
-  ],
+  "keywords": ["fallbridge", "sdk", "sovereign", "ai-native-solutions"],
   "author": "AI-Native Solutions",
   "license": "MIT",
   "repository": {
